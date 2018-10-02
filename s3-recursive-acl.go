@@ -25,15 +25,14 @@ func main() {
 		Region: aws.String(region),
 	})
 
-	err := svc.ListObjectsPages(&s3.ListObjectsInput{
-		Prefix: aws.String(path),
-		Bucket: aws.String(bucket),
-	}, func(page *s3.ListObjectsOutput, lastPage bool) bool {
-		for _, object := range page.Contents {
-			key := *object.Key
-			counter++
-			go func(bucket string, key string, cannedACL string) {
-				wg.Add(1)
+	nJobs := 1000
+	jobs := make(chan string, nJobs*2)
+	wg.Add(nJobs)
+
+	for i := 0; i < nJobs; i++ {
+		go func() {
+			defer wg.Done()
+			for key := range jobs {
 				_, err := svc.PutObjectAcl(&s3.PutObjectAclInput{
 					ACL:    aws.String(cannedACL),
 					Bucket: aws.String(bucket),
@@ -43,13 +42,31 @@ func main() {
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Failed to change permissions on '%s', %v", key, err)
 				}
-				defer wg.Done()
-			}(bucket, key, cannedACL)
+			}
+		}()
+	}
+
+
+	err := svc.ListObjectsV2Pages(&s3.ListObjectsV2Input{
+		Prefix: aws.String(path),
+		Bucket: aws.String(bucket),
+	}, func(page *s3.ListObjectsV2Output, lastPage bool) bool {
+		for _, object := range page.Contents {
+			key := *object.Key
+			counter++
+			jobs <- key
+		}
+
+		if page.ContinuationToken != nil {
+			fmt.Println(*page.ContinuationToken)
 		}
 		return true
 	})
 
+	////close jobs & wait for all workers to finish
+	close(jobs)
 	wg.Wait()
+
 
 	if err != nil {
 		panic(fmt.Sprintf("Failed to update object permissions in '%s', %v", bucket, err))
